@@ -1,5 +1,5 @@
 import { getHtmlLang, handleShopifyRedirects, handleShopifyRoutes } from "@shopify/hydrogen";
-import { ShopifyScripts } from "@shopify/hydrogen/react";
+import { LocaleProvider, ShopifyScripts } from "@shopify/hydrogen/react";
 import type { ReactNode } from "react";
 import {
   isRouteErrorResponse,
@@ -147,16 +147,20 @@ export function Layout({ children }: { children: ReactNode }) {
 
 export default function App({ loaderData }: Route.ComponentProps) {
   return (
-    <CartProvider initialData={loaderData.cartData}>
-      <PageViewedTracker />
-      <CartAnalyticsTracker />
-      <AnnouncementBar />
-      <Header shopInfo={loaderData.shopInfo} />
-      <Outlet />
-      <Footer shopInfo={loaderData.shopInfo} />
-      <CartDrawer />
-      <SearchDrawer />
-    </CartProvider>
+    // Keeps cart and predictive search requests under the locale's path prefix once the i18n
+    // definition in `lib/shop.ts` serves more than one locale.
+    <LocaleProvider locale={loaderData.locale}>
+      <CartProvider initialData={loaderData.cartData}>
+        <PageViewedTracker />
+        <CartAnalyticsTracker />
+        <AnnouncementBar />
+        <Header shopInfo={loaderData.shopInfo} />
+        <Outlet />
+        <Footer shopInfo={loaderData.shopInfo} />
+        <CartDrawer />
+        <SearchDrawer />
+      </CartProvider>
+    </LocaleProvider>
   );
 }
 
