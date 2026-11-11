@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { attachStagehand, type AgentOutcome, type AgentRunInput } from "./agent/stagehand-agent.ts";
+import { readCart, type CartSnapshot } from "./browser/cart.ts";
 import { createBrowserSession } from "./browser/session.ts";
 import { main, parseCliArgs, USAGE } from "./cli.ts";
 import { ADD_EVENT_NAME, AddEventLog, observeAddEvents } from "./shopify/add-events.ts";
@@ -9,6 +10,7 @@ import { discoverContext, type StorefrontContext } from "./shopify/storefront.ts
 
 vi.mock("./browser/session.ts", () => ({ createBrowserSession: vi.fn() }));
 vi.mock("./agent/stagehand-agent.ts", () => ({ attachStagehand: vi.fn() }));
+vi.mock("./browser/cart.ts", () => ({ readCart: vi.fn() }));
 vi.mock("./shopify/add-events.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./shopify/add-events.ts")>()),
   observeAddEvents: vi.fn(),
@@ -32,11 +34,12 @@ const PINNED: PinnedVariant = {
   variantId: "gid://shopify/ProductVariant/1",
   selectedOptions: [{ name: "Size", value: "M" }],
 };
-const PASS_REASON =
-  "Every add event held exactly 1 unit of the pinned variant and resolved without cart user errors.";
-const NO_ADD = "No add Standard Event was recorded by the time Stagehand was disconnected.";
+const CART: CartSnapshot = { lines: [{ variantId: PINNED.variantId, quantity: 1 }] };
+const PASS_REASON = "The cart holds exactly 1 unit of the pinned variant.";
+const NO_ADD =
+  "No add Standard Event was recorded by the time Stagehand was disconnected, so the cart was not read.";
 const CLAIMED_ADD =
-  "The agent reports that it added the item, but no shopify:cart:lines-update event was dispatched.";
+  "The agent reports that it added the item, but no shopify:cart:lines-update event was dispatched, so the cart was not read.";
 /** The `agent` field of a run that the first add event stopped. */
 const STOPPED: AgentOutcome = {
   completed: false,
@@ -51,6 +54,8 @@ let calls: string[];
 let log: AddEventLog;
 /** The arguments of each call of the log's wait. */
 let waits: Array<{ ms: number; signal: AbortSignal }>;
+/** Stands for the browser context's request API, which `readCart` receives. */
+const REQUEST = { name: "context request API" };
 
 beforeEach(() => {
   stdout = [];
@@ -71,6 +76,10 @@ beforeEach(() => {
     log = new AddEventLog();
     return log;
   });
+  vi.mocked(readCart).mockImplementation(async () => {
+    calls.push("cart");
+    return CART;
+  });
   vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
     stdout.push(String(chunk));
     return true;
@@ -89,6 +98,7 @@ afterEach(() => {
   vi.mocked(discoverContext).mockReset();
   vi.mocked(pinVariant).mockReset();
   vi.mocked(observeAddEvents).mockReset();
+  vi.mocked(readCart).mockReset();
 });
 
 describe("parseCliArgs", () => {
@@ -138,7 +148,7 @@ describe("main", () => {
     expect(createBrowserSession).not.toHaveBeenCalled();
   });
 
-  it("stops the agent at the first add event, then detaches, waits for the outcome, and passes", async () => {
+  it("stops the agent at the first add event, then detaches, waits for the outcome, reads the cart once, and passes", async () => {
     const { session, agent } = fakes({ settle: "in-wait" });
 
     await expect(main(["https://shop.example/en-ca?x=1"])).resolves.toBe(0);
@@ -149,6 +159,7 @@ describe("main", () => {
         reason: PASS_REASON,
         context: CONTEXT,
         pinned: PINNED,
+        cart: CART,
         agent: STOPPED,
       },
     ]);
@@ -165,6 +176,7 @@ describe("main", () => {
       "detach",
       "wait",
       "settled",
+      "cart",
       "detach",
       "close",
     ]);
@@ -198,10 +210,31 @@ describe("main", () => {
     expect(interrupt?.aborted).toBe(false);
     // The wait has the 5000 ms limit and ends on the interrupt.
     expect(waits).toEqual([{ ms: 5_000, signal: interrupt }]);
+    // One cart read through the context request API, on the landed origin.
+    expect(readCart).toHaveBeenCalledOnce();
+    expect(readCart).toHaveBeenCalledWith(REQUEST, "https://shop.example");
     expect(stdout.join("") + stderr.join("")).not.toContain(KEY);
   });
 
-  it("fails with exit 1 when the add promise was rejected", async () => {
+  it("fails with exit 1 and the cart when the cart holds another quantity", async () => {
+    fakes();
+    vi.mocked(readCart).mockResolvedValue({ lines: [] });
+
+    await expect(main(["https://shop.example"])).resolves.toBe(1);
+
+    expect(results()).toEqual([
+      {
+        status: "fail",
+        reason: "The cart has no line with the pinned variant.",
+        context: CONTEXT,
+        pinned: PINNED,
+        cart: { lines: [] },
+        agent: STOPPED,
+      },
+    ]);
+  });
+
+  it("fails with exit 1 and no cart field when the add promise was rejected", async () => {
     fakes({ settle: "rejected" });
 
     await expect(main(["https://shop.example"])).resolves.toBe(1);
@@ -209,15 +242,16 @@ describe("main", () => {
     expect(results()).toEqual([
       {
         status: "fail",
-        reason: "An add event promise was rejected.",
+        reason: "An add event promise was rejected, so the cart was not read.",
         context: CONTEXT,
         pinned: PINNED,
         agent: STOPPED,
       },
     ]);
+    expect(readCart).not.toHaveBeenCalled();
   });
 
-  it("fails with exit 1 when the agent confirms completion but no add event was dispatched", async () => {
+  it("fails with exit 1 and no cart read when the agent confirms completion but no add event was dispatched", async () => {
     const { agent } = fakes({ adds: false });
 
     await expect(main(["https://shop.example"])).resolves.toBe(1);
@@ -232,9 +266,10 @@ describe("main", () => {
       },
     ]);
     expect(agent.detach).toHaveBeenCalled();
+    expect(readCart).not.toHaveBeenCalled();
   });
 
-  it("is indeterminate with the agent's final message when the agent ends with no add event and no completion", async () => {
+  it("is indeterminate with the agent's final message and no cart read when the agent ends with no add event and no completion", async () => {
     const outcome: AgentOutcome = {
       completed: false,
       reason: "The agent reached the 20-step limit.",
@@ -258,6 +293,7 @@ describe("main", () => {
       },
     ]);
     expect(agent.detach).toHaveBeenCalled();
+    expect(readCart).not.toHaveBeenCalled();
   });
 
   it("evaluates an add that reaches Node after the agent ended by itself, before the detach", async () => {
@@ -274,12 +310,13 @@ describe("main", () => {
     expect(results()).toEqual([
       {
         status: "fail",
-        reason: "An add event promise was rejected.",
+        reason: "An add event promise was rejected, so the cart was not read.",
         context: CONTEXT,
         pinned: PINNED,
         agent: { completed: true, summary: "Added." },
       },
     ]);
+    expect(readCart).not.toHaveBeenCalled();
   });
 
   it("ignores a settled add recorded before the agent started", async () => {
@@ -305,6 +342,7 @@ describe("main", () => {
       },
     ]);
     expect(log.events).toHaveLength(2);
+    expect(readCart).not.toHaveBeenCalled();
   });
 
   it("reports a missing SHOPIFY_PROXY_KEY before the browser starts", async () => {
@@ -420,7 +458,7 @@ describe("main", () => {
     expect(session.close).toHaveBeenCalledOnce();
   });
 
-  it("reports indeterminate without a verdict when the release after an add is not confirmed", async () => {
+  it("reports indeterminate without a cart read when the release after an add is not confirmed", async () => {
     const { session, agent } = fakes();
     agent.detach.mockRejectedValue(
       new Error("Stagehand did not release the browser: no confirmation in 2000 ms"),
@@ -438,11 +476,11 @@ describe("main", () => {
       },
     ]);
     // No evaluation without a confirmed release.
-    expect(calls).not.toContain("wait");
+    expect(readCart).not.toHaveBeenCalled();
     expect(session.close).toHaveBeenCalledOnce();
   });
 
-  it("stops on SIGINT during the detach after a settled add, with no wait", async () => {
+  it("stops on SIGINT during the detach after a settled add, with no wait and no cart read", async () => {
     const { agent, session } = fakes();
     agent.detach.mockImplementationOnce(async () => {
       calls.push("detach");
@@ -461,6 +499,7 @@ describe("main", () => {
       },
     ]);
     expect(calls).not.toContain("wait");
+    expect(readCart).not.toHaveBeenCalled();
     expect(session.close).toHaveBeenCalledOnce();
   });
 
@@ -492,6 +531,7 @@ describe("main", () => {
         },
       ]);
       expect(agent.detach).toHaveBeenCalled();
+      expect(readCart).not.toHaveBeenCalled();
       expect(session.close).toHaveBeenCalledOnce();
       expect(process.listenerCount(signal)).toBe(listenersBefore);
     },
@@ -553,6 +593,31 @@ describe("main", () => {
     expect(process.listenerCount("SIGTERM")).toBe(listenersBefore);
   });
 
+  it("stops on SIGINT while the cart is read after an add and reports indeterminate", async () => {
+    const { promise: reading, resolve: readStarted } = Promise.withResolvers<void>();
+    const { session } = fakes();
+    vi.mocked(readCart).mockImplementation(async () => {
+      readStarted();
+      return new Promise(() => undefined);
+    });
+
+    const run = main(["https://shop.example"]);
+    await reading;
+    process.emit("SIGINT", "SIGINT");
+
+    await expect(run).resolves.toBe(2);
+    expect(results()).toEqual([
+      {
+        status: "indeterminate",
+        reason: "Interrupted by SIGINT.",
+        context: CONTEXT,
+        pinned: PINNED,
+        agent: STOPPED,
+      },
+    ]);
+    expect(session.close).toHaveBeenCalledOnce();
+  });
+
   it("still prints the result when browser cleanup fails", async () => {
     const { session } = fakes();
     session.close.mockRejectedValue(new Error("profile is busy"));
@@ -589,6 +654,8 @@ function fakes({
   const page = {
     goto: vi.fn(track("goto", { status: () => 200 })),
     waitForFunction: vi.fn(track("ready", undefined)),
+    url: () => "https://shop.example/en-ca/products/board",
+    context: () => ({ request: REQUEST }),
   };
   for (const [name, implementation] of Object.entries(pageOverrides)) {
     (page as Record<string, unknown>)[name] = vi.fn(implementation as () => unknown);
