@@ -1,5 +1,45 @@
 # @shopify/hydrogen
 
+## 2026.10.4
+
+### Minor Changes
+
+- 96a5529: Add `getHtmlLang`, which converts a Shopify language code into the BCP 47 tag for the `<html lang>` attribute. Shopify's regional codes no longer produce invalid tags such as `pt_br`.
+  
+  ```tsx
+  import { getHtmlLang } from "@shopify/hydrogen";
+  
+  <html lang={getHtmlLang(requestContext.locale.language)}>;
+  // EN -> "en", PT_BR -> "pt-BR", ZH_TW -> "zh-Hant"
+  ```
+  
+  It takes the language only: `<html lang>` names the language the page is written in, not the market country.
+- 6bcd256: Serve a Hydrogen manifest at `/__shopify/hydrogen/manifest.json` from `handleShopifyRoutes`, so Shopify services can build URLs for a headless storefront. The route is always on and needs no new options: it reads the `routeTemplates` you already pass and the `defineShopifyI18n` definition in the request context.
+  
+  ```json
+  {
+    "version": 1,
+    "routes": { "product": "/p/:productHandle", "cart": "/basket", "...": "..." },
+    "i18n": {
+      "type": "pathname",
+      "defaultLocale": { "language": "EN", "country": "US" },
+      "locales": [
+        { "language": "EN", "country": "US", "pathPrefix": "" },
+        { "language": "FR", "country": "CA", "pathPrefix": "/fr-ca" }
+      ]
+    }
+  }
+  ```
+  
+  `routes` lists every standard route, filling in Shopify's default path for each one you don't override, and is `null` when `handleShopifyRoutes` receives no `routeTemplates`. `i18n` lists every supported locale, default first, with its `pathPrefix` under pathname routing or its `hostname` under domain routing, and is `null` when the request context uses the deprecated fixed-locale `i18n` input. Only those fields are published: extra keys on route templates or locale entries stay private. Every hostname in a domain-routed definition is published, so keep staging or unreleased hostnames out of it. The route answers `GET` and `HEAD` with a short public cache, and other methods with `405`.
+
+### Patch Changes
+
+- 8aeb372: `getCartId()` now reads the cart ID only from the `cart` cookie and no longer reads a `cartId` search parameter. To load a specific cart, pass its ID to `getCart()`.
+- 07abf40: The Customer Account authorize route now redirects to the failed-login path when the OAuth token request times out, can't reach Shopify, or gets a response body that isn't JSON. These failures used to reject `handleShopifyRoutes()`, so the customer saw the app's error page instead. The authorize route now also logs a `sign-in failed` warning with the error code whenever it redirects to the failed-login path.
+  
+  `customerSession.handleOAuthCallback()` now throws `CustomerAccountOAuthError` for these failures, with the original error as `cause`. The code is `token_exchange_failed` when the token request fails or times out, and `invalid_token_response` when the response body isn't JSON. If you call `handleOAuthCallback()` directly and catch `CustomerAccountApiError` to handle token request timeouts, catch `CustomerAccountOAuthError` instead.
+
 ## 2026.10.3
 
 ### Minor Changes
