@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { publicStorefrontClient, readData, type StorefrontContext } from "./storefront.ts";
+import { publicStorefrontClient, readData, type StorefrontLocale } from "./storefront.ts";
 
 export const PRODUCTS_PER_PAGE = 50;
 export const PAGE_LIMIT = 5;
@@ -56,7 +56,7 @@ type CatalogProduct = z.infer<typeof catalogPageSchema>["products"]["nodes"][num
  */
 export async function pinVariant(
   storefrontUrl: URL,
-  context: StorefrontContext,
+  context: StorefrontLocale,
   signal: AbortSignal,
 ): Promise<CatalogPin> {
   const client = publicStorefrontClient(storefrontUrl, context);

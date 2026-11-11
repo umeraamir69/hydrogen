@@ -14,19 +14,27 @@ import type { z } from "zod";
 /** Per request. Hydrogen's client enforces it and throws `StorefrontTimeoutError`. */
 export const REQUEST_DEADLINE_MS = 10_000;
 
-/** The country and language that the Storefront API reports as active. */
-export type StorefrontContext = { country: CountryCode; language: LanguageCode };
+/** The country and language that Storefront API requests send with `@inContext`. */
+export type StorefrontLocale = { country: CountryCode; language: LanguageCode };
+
+/**
+ * The context that the Storefront API reports as active: the shop's primary market. `countryName`
+ * and `currency` are store data for the agent task.
+ */
+export type StorefrontContext = StorefrontLocale & { countryName: string; currency: string };
 
 // No `@inContext`: the API answers with the context that it makes active by default.
 const LOCALIZATION_QUERY = `query AgenticE2ELocalization {
-  localization { language { isoCode } country { isoCode } }
+  localization { language { isoCode } country { isoCode name currency { isoCode } } }
 }`;
 
 // Inert: the request context needs a locale, but the query declares no `$country` or
 // `$language`, so the client sends neither.
-const BOOTSTRAP_LOCALE: StorefrontContext = { country: "US", language: "EN" };
+const BOOTSTRAP_LOCALE: StorefrontLocale = { country: "US", language: "EN" };
 
-/** Asks the Storefront API at the URL's origin which country and language are active. */
+/**
+ * Asks the Storefront API at the URL's origin which country, language, and currency are active.
+ */
 export async function discoverContext(
   storefrontUrl: URL,
   signal: AbortSignal,
@@ -38,6 +46,11 @@ export async function discoverContext(
   return {
     country: required(localization?.country?.isoCode, "localization.country.isoCode"),
     language: required(localization?.language?.isoCode, "localization.language.isoCode"),
+    countryName: required(localization?.country?.name, "localization.country.name"),
+    currency: required(
+      localization?.country?.currency?.isoCode,
+      "localization.country.currency.isoCode",
+    ),
   };
 }
 
@@ -53,7 +66,7 @@ function required<T>(value: T | null | undefined, path: string): T {
  * fills the variables that a query declares as `$country: CountryCode` and
  * `$language: LanguageCode` from `locale`.
  */
-export function publicStorefrontClient(storefrontUrl: URL, locale: StorefrontContext) {
+export function publicStorefrontClient(storefrontUrl: URL, locale: StorefrontLocale) {
   return createStorefrontClient({
     type: "public",
     requestContext: createShopifyRequestContext({
